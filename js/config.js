@@ -46,7 +46,8 @@ export const Z_DISGUST_UNCALIBRATED = 14.0;
 // ...and a raw floor, so a tiny sigma can't become a hair trigger.
 // tongue_jaw is low on purpose: sticking your tongue out barely opens the jaw.
 export const FLOOR = { jaw_open: 0.30, scream_jaw: 0.18, tongue_jaw: 0.08, sneer: 0.04, squint: 0.18 };
-export const T = { tongue: 0.4, head_turn: 0.15, smile: 0.35 };
+// tongue: share of the mouth opening (top half included) that is tongue-coloured.
+export const T = { tongue: 0.65, head_turn: 0.15, smile: 0.35 };
 
 // talking_to_wall: big, repeated back-and-forth hand movement, not just a hand
 // that moves. Distances are in face widths, so it works at any distance; times

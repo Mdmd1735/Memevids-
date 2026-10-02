@@ -173,7 +173,12 @@ export const over = (key, m, zkey, rawkey) => m[zkey] >= Z[key] && m[rawkey] >= 
  * different skin tones, so this compares the inside of the mouth with *your own
  * cheeks*: skin leans orange, tongue leans pink-red (its hue sits clearly
  * toward magenta from your skin's), teeth are pale, and the back of the throat
- * is dark. Comparing hue, not "how red", is what works on warm, darker skin. A gasp shows mostly dark throat and teeth; a
+ * is dark. Comparing hue, not "how red", is what works on warm, darker skin.
+ *
+ * Out vs. in: an open mouth shows your tongue too, lying at the bottom with
+ * teeth or dark throat above it. A tongue sticking *out* fills the opening up
+ * to the top lip. So the top half of the opening has to be tongue as well, and
+ * hardly any dark throat can show. A gasp shows mostly dark throat and teeth; a
  * tongue sticking out fills the opening with red.
  * `ctx` is the clean (no overlay) frame.
  */
@@ -206,11 +211,14 @@ export function tongueScore(ctx, face, hands, jawReady) {
   const shrunk = poly.map(([x, y]) => [cx + (x - cx) * 0.88, cy + (y - cy) * 0.88]);
 
   const data = ctx.getImageData(x0, y0, w, h).data;
-  let n = 0, red = 0, dark = 0;
+  const midY = (Math.min(...shrunk.map((q) => q[1])) + Math.max(...shrunk.map((q) => q[1]))) / 2;
+  let n = 0, red = 0, dark = 0, nTop = 0, redTop = 0;
   for (let yy = 0; yy < h; yy++) {
+    const top = y0 + yy + 0.5 < midY;
     for (let xx = 0; xx < w; xx++) {
       if (!inside(shrunk, x0 + xx + 0.5, y0 + yy + 0.5)) continue;
       n++;
+      if (top) nTop++;
       const i = (yy * w + xx) * 4;
       const r = data[i], g = data[i + 1], b = data[i + 2];
       const max = Math.max(r, g, b);
@@ -218,13 +226,17 @@ export function tongueScore(ctx, face, hands, jawReady) {
       if ((max - Math.min(r, g, b)) / max < 0.18) continue;          // teeth: pale, unsaturated
       // Degrees the pixel's hue sits toward pink/magenta from your skin's.
       const toward = ((skin.hue - hue(r, g, b) + 540) % 360) - 180;
-      if (toward >= 10 && toward <= 70) red++;
+      if (toward >= 10 && toward <= 70) {
+        red++;
+        if (top) redTop++;
+      }
     }
   }
-  if (n < 30) return 0;
-  // A mostly dark opening is a gasp with the tongue lying low, not a tongue out.
-  const darkFrac = dark / n;
-  return (red / n) * (darkFrac > 0.3 ? 0.5 : 1);
+  if (n < 30 || nTop < 10) return 0;
+  // Throat showing = the tongue is inside your mouth, not out.
+  if (dark / n > 0.2) return 0;
+  // Tongue all the way up the opening, not just lying along the bottom.
+  return Math.min(red / n, redTop / nTop);
 }
 
 function hue(r, g, b) {
