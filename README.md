@@ -69,6 +69,10 @@ python its_giving_v2.py
 There's also a browser version: calibrate, pull faces, take a 4-photo strip,
 download it. No Python, no install.
 
+**Live: https://mdmd1735.github.io/Memevids-/** — works on phones too (open in
+Safari / Chrome and allow the camera). Pages publishes from the `gh-pages`
+branch, so push changes there as well as to `main`.
+
 ```bash
 python3 -m http.server 8000      # from this folder
 # then open http://localhost:8000 and allow the camera
