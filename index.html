@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>It's Giving Photobooth</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>IT'S GIVING <span>PHOTOBOOTH</span></h1>
+      <p>Calibrate your neutral face, pull a face, and make a 4-photo strip.</p>
+    </header>
+
+    <main class="main-content">
+      <div class="stage-container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <div class="stage">
+          <canvas id="outputCanvas" width="1280" height="720"></canvas>
+          <canvas id="debugCanvas" class="hidden" aria-hidden="true"></canvas>
+          <div id="countdownOverlay" class="hidden"></div>
+        </div>
+
+        <div class="controls">
+          <button id="calibrateBtn" class="btn secondary" disabled>1. Calibrate Face (5s)</button>
+          <button id="startBoothBtn" class="btn primary" disabled>2. Start Photo Strip (4 Pics)</button>
+        </div>
+        <div class="tools">
+          <label class="toggle" title="Off shows the true view, so text on your clothes reads the right way round">
+            <input type="checkbox" id="mirrorToggle" checked />
+            <span>Mirror like a selfie</span>
+          </label>
+          <select id="testPose" class="mini" aria-label="Preview a meme">
+            <option value="">Preview a meme…</option>
+          </select>
+          <button id="debugBtn" class="mini" type="button" aria-pressed="false">Debug view</button>
+        </div>
+        <p id="statusText" class="status" role="status">Starting…</p>
+        <details class="poses">
+          <summary>14 reactions — how to trigger them</summary>
+          <ul>
+            <li><b>Time out</b> — referee's T: one hand flat on top, one upright underneath</li>
+            <li><b>Heart</b> — both hands, index tips together, thumb tips together</li>
+            <li><b>Cover nose</b> — both hands over your nose and mouth</li>
+            <li><b>Crashing out</b> — both hands on your head, mouth open</li>
+            <li><b>Dance</b> — both hands up behind your head, mouth closed</li>
+            <li><b>Nose closed</b> — pinch your nose shut</li>
+            <li><b>Flirty</b> — one index fingertip on your lips</li>
+            <li><b>Hand up</b> — one open palm up beside your head</li>
+            <li><b>Tongue out</b> — mouth open, tongue out</li>
+            <li><b>Gasp</b> — jaw drops</li>
+            <li><b>Disgusted</b> — scrunch your nose, or brows down and frown</li>
+            <li><b>Talking to the wall</b> — hands in frame, gesturing</li>
+            <li><b>Suspicious</b> — turn your head and squint</li>
+            <li><b>Spin</b> — leave the frame entirely</li>
+          </ul>
+          <p>Keys: <kbd>D</kbd> debug view · <kbd>C</kbd> recalibrate · <kbd>M</kbd> mirror · <kbd>1</kbd>–<kbd>0</kbd> <kbd>-</kbd> <kbd>=</kbd> <kbd>[</kbd> <kbd>]</kbd> show each meme for 2 s</p>
+        </details>
+        <pre id="hud" class="hud hidden"></pre>
+      </div>
+
+      <aside class="gallery-container">
+        <h2>Your Photo Strip</h2>
+        <div id="stripPreview" class="photo-strip">
+          <div class="slot">Photo 1</div>
+          <div class="slot">Photo 2</div>
+          <div class="slot">Photo 3</div>
+          <div class="slot">Photo 4</div>
+        </div>
+        <button id="downloadBtn" class="btn secondary" disabled>Download strip</button>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    // ES modules and the camera don't work from file://. Say so instead of hanging.
+    if (location.protocol === "file:") {
+      document.getElementById("statusText").textContent =
+        "This page has to be served, not opened as a file. In this folder run:  python3 -m http.server 8000  then open http://localhost:8000";
+    }
+  </script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

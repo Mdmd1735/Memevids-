@@ -1,0 +1,271 @@
+// Face / hand / body geometry, expression measures and the pose decision.
+// Ported from Face / Hand / Body / Motion / tongue_score / measure / decide in
+// its_giving_v2.py — same landmarks, same thresholds, same order.
+//
+// Everything works in the coordinates of the frame as displayed. Head turn is
+// normalised to the mirrored convention so a calibration survives toggling the
+// mirror.
+import { Z, Z_CAP, FLOOR, T, ARM, DEFAULT_ARM, HOLD_FRAMES, POSES } from "./config.js";
+
+const INNER_LIPS = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191];
+
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+export class Face {
+  constructor(landmarks, blendshapes, W, H, mirrored = true) {
+    const p = landmarks.map((l) => [l.x * W, l.y * H]);
+    this.pts = p;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [x, y] of p) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    this.box = [x0, y0, x1, y1];
+    this.w = x1 - x0;
+    this.h = y1 - y0;
+    this.center = [(x0 + x1) / 2, (y0 + y1) / 2];
+    this.nose = p[1];
+    this.chin = p[152];
+    this.top = p[10];
+    this.mouth = [(p[13][0] + p[14][0]) / 2, (p[13][1] + p[14][1]) / 2];
+    this.eyeY = (p[33][1] + p[263][1]) / 2;
+    const cl = p[234], cr = p[454];
+    const turn = (this.nose[0] - cl[0]) / Math.max(cr[0] - cl[0], 1e-3) - 0.5;
+    this.turnSigned = mirrored ? turn : -turn;
+    this.bs = {};
+    for (const c of blendshapes?.categories || []) this.bs[c.categoryName] = c.score;
+  }
+
+  b(name) {
+    return this.bs[name] ?? 0;
+  }
+}
+
+export class Hand {
+  constructor(landmarks, W, H) {
+    const p = landmarks.map((l) => [l.x * W, l.y * H]);
+    const avg = (ids) => [ids.reduce((a, i) => a + p[i][0], 0) / ids.length, ids.reduce((a, i) => a + p[i][1], 0) / ids.length];
+    this.palm = avg([0, 5, 9, 13, 17]);
+    this.thumb = p[4];
+    this.index = p[8];
+    this.middle = p[12];
+    const dx = p[9][0] - p[0][0], dy = p[9][1] - p[0][1];
+    this.horizontal = Math.abs(dx) > 1.5 * Math.abs(dy);
+    this.vertical = Math.abs(dy) > 1.5 * Math.abs(dx);
+    // A finger is extended when its tip is clearly further from the wrist than its middle joint.
+    const ext = [8, 12, 16, 20].filter((t) => dist(p[0], p[t]) > 1.2 * dist(p[0], p[t - 2])).length;
+    this.open = ext >= 3;
+  }
+}
+
+/** Upper-body pose: shoulders 11/12, elbows 13/14, wrists 15/16. */
+export class Body {
+  constructor(landmarks, W, H) {
+    const p = (i) => [landmarks[i].x * W, landmarks[i].y * H];
+    this.shoulders = [p(11), p(12)];
+    this.elbows = [p(13), p(14)];
+    this.seen = Math.min(...[11, 12, 13, 14].map((i) => landmarks[i].visibility ?? 1)) > 0.5;
+    const shoulderY = (this.shoulders[0][1] + this.shoulders[1][1]) / 2;
+    this.elbowsUp = this.seen && this.elbows.every((e) => e[1] < shoulderY);
+  }
+}
+
+/** Smoothed hand speed across frames, in face-widths per frame. */
+export class Motion {
+  constructor() {
+    this.prev = [];
+    this.energy = 0;
+    this.fw = 200;
+  }
+
+  update(hands, face) {
+    if (face) this.fw = Math.max(face.w, 1);
+    const cur = hands.map((h) => h.palm);
+    let speed = 0;
+    if (cur.length && this.prev.length) {
+      const moved = cur
+        .map((c) => Math.min(...this.prev.map((q) => dist(c, q))))
+        .filter((m) => m < this.fw);   // a jump bigger than a face is a new hand, not motion
+      if (moved.length) speed = Math.max(...moved) / this.fw;
+    }
+    this.energy = 0.8 * this.energy + 0.2 * speed;
+    this.prev = cur;
+    return this.energy;
+  }
+}
+
+/** Every expression channel, raw and in sigma above your own neutral. */
+export function measure(face, base) {
+  const zpair = (n) => (base.z(n + "Left", face.b(n + "Left")) + base.z(n + "Right", face.b(n + "Right"))) / 2;
+  const pair = (n) => (face.b(n + "Left") + face.b(n + "Right")) / 2;
+  const m = {
+    jaw: face.b("jawOpen"), z_jaw: base.z("jawOpen", face.b("jawOpen")),
+    sneer: pair("noseSneer"), z_sneer: zpair("noseSneer"),
+    z_brow: zpair("browDown"), z_frown: zpair("mouthFrown"), z_lip: zpair("mouthUpperUp"),
+    squint: Math.max(pair("eyeSquint"), pair("eyeBlink")),
+    z_squint: Math.max(zpair("eyeSquint"), zpair("eyeBlink")),
+    turn: Math.abs(face.turnSigned - base.neutralTurn),
+  };
+  const cap = (v) => Math.min(v, Z_CAP);
+  m.z_disgust = 2 * cap(m.z_sneer) + cap(m.z_brow) + cap(m.z_frown) + cap(m.z_lip);
+  return m;
+}
+
+/** Sigma above your neutral AND a raw floor. */
+export const over = (key, m, zkey, rawkey) => m[zkey] >= Z[key] && m[rawkey] >= FLOOR[key];
+
+/**
+ * Fraction of the mouth opening that reads pink: saturated and lit, unlike
+ * teeth or throat. `ctx` is the clean (no overlay) mirrored frame.
+ */
+export function tongueScore(ctx, face, hands, jawReady) {
+  if (!jawReady) return 0;
+  // A hand near the mouth is skin-pink too.
+  if (hands.some((h) => dist(h.palm, face.mouth) < 0.7 * face.w)) return 0;
+  const poly = INNER_LIPS.map((i) => face.pts[i]);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of poly) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  if (x1 - x0 < 8 || y1 - y0 < 8) return 0;
+  x0 = Math.max(Math.floor(x0), 0);
+  y0 = Math.max(Math.floor(y0), 0);
+  x1 = Math.min(Math.ceil(x1), ctx.canvas.width - 1);
+  y1 = Math.min(Math.ceil(y1), ctx.canvas.height - 1);
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  if (w <= 0 || h <= 0) return 0;
+
+  // Python erodes the lip mask by 15% of its height; shrinking the polygon
+  // toward its centroid by the same amount is close enough and much cheaper.
+  const cx = poly.reduce((s, q) => s + q[0], 0) / poly.length;
+  const cy = poly.reduce((s, q) => s + q[1], 0) / poly.length;
+  const shrunk = poly.map(([x, y]) => [cx + (x - cx) * 0.85, cy + (y - cy) * 0.85]);
+
+  const data = ctx.getImageData(x0, y0, w, h).data;
+  let n = 0, pink = 0;
+  for (let yy = 0; yy < h; yy++) {
+    for (let xx = 0; xx < w; xx++) {
+      if (!inside(shrunk, x0 + xx + 0.5, y0 + yy + 0.5)) continue;
+      n++;
+      const i = (yy * w + xx) * 4;
+      if (isPink(data[i], data[i + 1], data[i + 2])) pink++;
+    }
+  }
+  return n < 40 ? 0 : pink / n;
+}
+
+function inside(poly, x, y) {
+  let hit = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) hit = !hit;
+  }
+  return hit;
+}
+
+// OpenCV HSV scale: H 0-180, S and V 0-255. Same thresholds as the Python.
+function isPink(r, g, b) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  if (max <= 110) return false;
+  const s = max === 0 ? 0 : ((max - min) / max) * 255;
+  if (s <= 70) return false;
+  const d = max - min;
+  let hue;
+  if (d === 0) hue = 0;
+  else if (max === r) hue = 60 * (((g - b) / d) % 6);
+  else if (max === g) hue = 60 * ((b - r) / d + 2);
+  else hue = 60 * ((r - g) / d + 4);
+  if (hue < 0) hue += 360;
+  const h = hue / 2;
+  return h < 12 || h > 160;
+}
+
+/** Return the raw pose for this frame, or null. Same order as the Python. */
+export function decide(face, hands, body, tongue, gesture, m) {
+  if (!face) {
+    const gone = !hands.length && (!body || !body.seen);
+    return gone ? "spin" : null;
+  }
+
+  const fw = face.w;
+  const near = (a, b, k) => dist(a, b) < k * fw;
+  const elbowsUp = !!body?.elbowsUp;
+  const screaming = over("scream_jaw", m, "z_jaw", "jaw");
+
+  if (hands.length >= 2) {
+    const [a, b] = hands;
+    for (const [top, under] of [[a, b], [b, a]]) {
+      if (top.horizontal && under.vertical && top.palm[1] < under.palm[1] && near(under.middle, top.palm, 0.6))
+        return "time_out";
+    }
+    if (near(a.index, b.index, 0.3) && near(a.thumb, b.thumb, 0.3) && a.index[1] + b.index[1] < a.thumb[1] + b.thumb[1])
+      return "heart";
+    if (near(a.palm, face.mouth, 0.6) && near(b.palm, face.mouth, 0.6)) return "cover_nose";
+    const onHead = (h) => h.palm[1] < face.eyeY && Math.abs(h.palm[0] - face.nose[0]) < 1.1 * fw &&
+      h.palm[1] > face.top[1] - 0.8 * face.h;
+    if (onHead(a) && onHead(b) && screaming) return "crashing_out";
+  }
+
+  // Hands behind your head are often invisible, so no hands counts as "all near the head".
+  const nearHead = (h) => Math.abs(h.palm[0] - face.nose[0]) < 1.3 * fw && h.palm[1] < face.eyeY + 0.3 * face.h;
+  if (elbowsUp && hands.every(nearHead)) return screaming ? "crashing_out" : "dance";
+
+  for (const h of hands) {
+    // Pinch: thumb and index both at the nose — and closer to it than to the
+    // mouth, or a finger on the lips (flirty) reads as a pinch.
+    const atNose = (p) => near(p, face.nose, 0.35) && dist(p, face.nose) < dist(p, face.mouth);
+    if (atNose(h.thumb) && atNose(h.index) && near(h.thumb, h.index, 0.3)) return "nose_closed";
+    if (near(h.index, face.mouth, 0.22) && !near(h.palm, face.mouth, 0.3)) return "flirty";
+    if (h.open && h.palm[1] < face.nose[1] && Math.abs(h.palm[0] - face.nose[0]) > 0.8 * fw) return "hand_up";
+  }
+
+  if (tongue > T.tongue) return "tongue_out";
+  if (over("jaw_open", m, "z_jaw", "jaw")) return "open_mouth";
+  if (over("sneer", m, "z_sneer", "sneer") || m.z_disgust >= Z.disgust) return "disgusted";
+  if (hands.length && gesture > T.gesture) return "talking_to_wall";
+  if (m.turn > T.head_turn && over("squint", m, "z_squint", "squint")) return "suspicious";
+  return null;
+}
+
+/** Arm / hold: a pose must persist ARM frames to fire, then lingers HOLD_FRAMES. */
+export class PoseTracker {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.arm = Object.fromEntries(POSES.map((p) => [p, 0]));
+    this.shown = null;
+    this.hold = 0;
+    this.shownSince = 0;
+    this.forced = null;
+    this.forcedUntil = 0;
+  }
+
+  force(pose, now, ms = 2000) {
+    this.forced = pose;
+    this.forcedUntil = now + ms;
+  }
+
+  update(raw, now) {
+    let fired = null;
+    for (const p of POSES) {
+      this.arm[p] = raw === p ? this.arm[p] + 1 : 0;
+      if (raw === p && this.arm[p] >= (ARM[p] ?? DEFAULT_ARM)) fired = p;
+    }
+    if (this.forced && now < this.forcedUntil) fired = this.forced;
+    if (fired) {
+      if (fired !== this.shown) this.shownSince = now;
+      this.shown = fired;
+      this.hold = HOLD_FRAMES;
+    } else if (this.hold > 0) {
+      this.hold -= 1;
+    } else {
+      this.shown = null;
+    }
+    return this.shown;
+  }
+}
+
+export { dist };
