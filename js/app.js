@@ -1,4 +1,4 @@
-import { ASSETS, CALIB, IS_PHONE, MEDIAPIPE, MIRROR_DEFAULT, PHOTOBOOTH_CONFIG, POSES, T, TEST_KEYS, Z } from "./config.js";
+import { ASSETS, CALIB, GESTURE, IS_PHONE, MEDIAPIPE, MIRROR_DEFAULT, PHOTOBOOTH_CONFIG, POSES, TEST_KEYS, Z } from "./config.js";
 import { Baseline, Collector, calibrationWarnings } from "./calibration.js";
 import { Body, Face, Hand, Motion, PoseTracker, decide, measure, over, tongueScore } from "./face.js";
 import { loadAssets } from "./assets.js";
@@ -163,9 +163,9 @@ function loop() {
 
   const m = face ? measure(face, base) : {};
   const tongue = face ? tongueScore(renderer.fctx, face, hands, over("tongue_jaw", m, "z_jaw", "jaw")) : 0;
-  const gesture = motion.update(hands, face);
-  const raw = decide(face, hands, body, tongue, gesture, m);
   const now = performance.now();
+  const gesture = motion.update(hands, face, now);
+  const raw = decide(face, hands, body, tongue, gesture, m);
   const shown = tracker.update(raw, now);
 
   renderer.track(face);
@@ -201,7 +201,7 @@ function setMirror(on) {
   mirrorToggle.checked = on;
   try { localStorage.setItem("itsgiving.mirror", on ? "1" : "0"); } catch { /* not persisted */ }
   // Positions jump to the other side; don't let that read as a fast gesture.
-  motion.prev = [];
+  motion.reset();
 }
 
 // ---- calibration ---------------------------------------------------------
@@ -239,7 +239,7 @@ function stepCalibration(face) {
   base = c.collector.finish();
   base.save();
   tracker.reset();
-  motion.prev = [];
+  motion.reset();
   const warn = calibrationWarnings(base);
   setStatus(warn.length
     ? `Calibrated on ${base.samples} frames, but ${warn.join("; ")}. Consider recalibrating.`
@@ -255,7 +255,7 @@ function drawHud(shown, raw, face, hands, body, m, tongue, gesture) {
     `showing: ${shown || "-"}   raw: ${raw || "-"}   face: ${face ? "yes" : "no"}   hands: ${hands.length}   ` +
       `elbows up: ${body?.elbowsUp ? "Y" : "n"}   ${fps.toFixed(0)} fps   ${mirror ? "mirrored" : "true view"}`,
     `jaw ${f(m.jaw, 2)} = ${s(m.z_jaw)} / ${Z.jaw_open}   squint ${f(m.squint, 2)} = ${s(m.z_squint)} / ${Z.squint}   ` +
-      `tongue ${f(tongue, 2)}   turn ${f(m.turn, 2)}   gesture ${f(gesture, 3)} / ${T.gesture}`,
+      `tongue ${f(tongue, 2)}   turn ${f(m.turn, 2)}   wave ${f(gesture.speed)}/${GESTURE.speed} fw/s, ${gesture.swings}/${GESTURE.minSwings} swings`,
     `disgust ${s(m.z_disgust)} / ${Z.disgust} = 2x sneer ${s(m.z_sneer)} + brow ${s(m.z_brow)} + frown ${s(m.z_frown)} + lip ${s(m.z_lip)}`,
     base.generic ? "NOT CALIBRATED — generic baseline. Press C." : `calibrated ${base.made} on ${base.samples} frames`,
     `keys: D debug   C calibrate   M mirror   test: ${POSES.map((p, i) => `${TEST_KEYS[i]} ${p}`).join("  ")}`,

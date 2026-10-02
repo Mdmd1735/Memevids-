@@ -41,7 +41,18 @@ export const Z = { jaw_open: 6.0, scream_jaw: 3.5, tongue_jaw: 3.5, sneer: 4.5, 
 export const Z_CAP = 8.0;
 // ...and a raw floor, so a tiny sigma can't become a hair trigger.
 export const FLOOR = { jaw_open: 0.30, scream_jaw: 0.18, tongue_jaw: 0.18, sneer: 0.06, squint: 0.18 };
-export const T = { tongue: 0.5, head_turn: 0.15, gesture: 0.035 };
+export const T = { tongue: 0.5, head_turn: 0.15 };
+
+// talking_to_wall: big, repeated back-and-forth hand movement, not just a hand
+// that moves. Distances are in face widths, so it works at any distance; times
+// are in seconds, so it behaves the same at 10 fps on a phone or 30 on a laptop.
+export const GESTURE = {
+  window: 1.2,      // look at the last 1.2 s of hand movement
+  jitter: 0.02,     // ignore per-frame wobble smaller than this (tracking noise)
+  swing: 0.35,      // a "swing" is a move of at least this far before reversing
+  minSwings: 3,     // ...and you need this many in the window (wave, wave, wave)
+  speed: 2.5,       // ...with the hand covering at least this many face widths per second
+};
 
 export const CALIB = {
   seconds: 5.0,          // Python uses 7; shorter suits a photobooth

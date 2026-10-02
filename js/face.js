@@ -5,7 +5,7 @@
 // Everything works in the coordinates of the frame as displayed. Head turn is
 // normalised to the mirrored convention so a calibration survives toggling the
 // mirror.
-import { Z, Z_CAP, FLOOR, T, ARM, DEFAULT_ARM, HOLD_FRAMES, POSES } from "./config.js";
+import { Z, Z_CAP, FLOOR, T, GESTURE, ARM, DEFAULT_ARM, HOLD_FRAMES, POSES } from "./config.js";
 
 const INNER_LIPS = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191];
 
@@ -70,27 +70,62 @@ export class Body {
   }
 }
 
-/** Smoothed hand speed across frames, in face-widths per frame. */
+/**
+ * Hand gesturing, measured over the last GESTURE.window seconds:
+ *   speed  — how far the hand travelled, in face widths per second
+ *   swings — how many big moves ended in a reversal (back-and-forth)
+ * Follows one hand (the one nearest where it was last frame).
+ */
 export class Motion {
   constructor() {
-    this.prev = [];
-    this.energy = 0;
     this.fw = 200;
+    this.reset();
   }
 
-  update(hands, face) {
+  reset() {
+    this.track = null;
+    this.samples = [];   // { t (s), x, y (face widths) }
+  }
+
+  update(hands, face, nowMs) {
     if (face) this.fw = Math.max(face.w, 1);
-    const cur = hands.map((h) => h.palm);
-    let speed = 0;
-    if (cur.length && this.prev.length) {
-      const moved = cur
-        .map((c) => Math.min(...this.prev.map((q) => dist(c, q))))
-        .filter((m) => m < this.fw);   // a jump bigger than a face is a new hand, not motion
-      if (moved.length) speed = Math.max(...moved) / this.fw;
+    const none = { speed: 0, swings: 0 };
+    if (!hands.length) {
+      this.reset();
+      return none;
     }
-    this.energy = 0.8 * this.energy + 0.2 * speed;
-    this.prev = cur;
-    return this.energy;
+    let p = hands[0].palm;
+    if (this.track) {
+      p = hands.map((h) => h.palm).reduce((a, b) => (dist(a, this.track) <= dist(b, this.track) ? a : b));
+      if (dist(p, this.track) > this.fw) this.samples = [];   // jumped: a different hand, not motion
+    }
+    this.track = p;
+
+    const t = nowMs / 1000;
+    this.samples.push({ t, x: p[0] / this.fw, y: p[1] / this.fw });
+    while (this.samples.length && t - this.samples[0].t > GESTURE.window) this.samples.shift();
+    const span = this.samples.length > 1 ? t - this.samples[0].t : 0;
+    if (span < GESTURE.window * 0.5) return none;   // not enough history yet
+
+    let path = 0;
+    const runs = { x: 0, y: 0 };
+    let swings = 0;
+    for (let i = 1; i < this.samples.length; i++) {
+      const dx = this.samples[i].x - this.samples[i - 1].x;
+      const dy = this.samples[i].y - this.samples[i - 1].y;
+      const step = Math.hypot(dx, dy);
+      if (step < GESTURE.jitter) continue;
+      path += step;
+      for (const [axis, d] of [["x", dx], ["y", dy]]) {
+        const run = runs[axis];
+        if (run === 0 || Math.sign(d) === Math.sign(run)) runs[axis] = run + d;
+        else {
+          if (Math.abs(run) >= GESTURE.swing) swings++;
+          runs[axis] = d;
+        }
+      }
+    }
+    return { speed: path / span, swings };
   }
 }
 
@@ -223,7 +258,7 @@ export function decide(face, hands, body, tongue, gesture, m) {
   if (tongue > T.tongue) return "tongue_out";
   if (over("jaw_open", m, "z_jaw", "jaw")) return "open_mouth";
   if (over("sneer", m, "z_sneer", "sneer") || m.z_disgust >= Z.disgust) return "disgusted";
-  if (hands.length && gesture > T.gesture) return "talking_to_wall";
+  if (hands.length && gesture.swings >= GESTURE.minSwings && gesture.speed >= GESTURE.speed) return "talking_to_wall";
   if (m.turn > T.head_turn && over("squint", m, "z_squint", "squint")) return "suspicious";
   return null;
 }

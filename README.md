@@ -148,7 +148,7 @@ someone who likes you first.
 | `tongue_out` | tongue out, mouth open |
 | `open_mouth` | jaw drops |
 | `disgusted` | scrunch your nose, or brows down and frown |
-| `talking_to_wall` | hands in frame, gesturing away |
+| `talking_to_wall` | hands in frame, gesturing away (browser: big back-and-forth waves, see `GESTURE` in `js/config.js`) |
 | `suspicious` | turn your head and squint |
 | `spin` | leave the frame entirely |
 
