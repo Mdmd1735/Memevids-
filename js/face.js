@@ -85,31 +85,37 @@ export class Motion {
   reset() {
     this.track = null;
     this.samples = [];   // { t (s), x, y (face widths) }
+    this.lastHandAt = -Infinity;
+    this.result = { speed: 0, swings: 0 };
   }
 
   update(hands, face, nowMs) {
     if (face) this.fw = Math.max(face.w, 1);
-    const none = { speed: 0, swings: 0 };
+    const t = nowMs / 1000;
     if (!hands.length) {
-      this.reset();
-      return none;
+      // A fast hand blurs and the tracker misses it for a frame or two: keep the
+      // history (and the last reading) through short gaps instead of starting over.
+      if (t - this.lastHandAt > GESTURE.gap) this.reset();
+      return this.result;
     }
+
     let p = hands[0].palm;
     if (this.track) {
       p = hands.map((h) => h.palm).reduce((a, b) => (dist(a, this.track) <= dist(b, this.track) ? a : b));
-      if (dist(p, this.track) > this.fw) this.samples = [];   // jumped: a different hand, not motion
+      // A jump further than a fast wave could cover since we last saw it = a different hand.
+      const dt = Math.max(t - this.lastHandAt, 1 / 60);
+      if (dist(p, this.track) / this.fw > 1 + 8 * dt) this.samples = [];
     }
     this.track = p;
+    this.lastHandAt = t;
 
-    const t = nowMs / 1000;
     this.samples.push({ t, x: p[0] / this.fw, y: p[1] / this.fw });
     while (this.samples.length && t - this.samples[0].t > GESTURE.window) this.samples.shift();
     const span = this.samples.length > 1 ? t - this.samples[0].t : 0;
-    if (span < GESTURE.window * 0.5) return none;   // not enough history yet
+    if (span < GESTURE.window * 0.4) return (this.result = { speed: 0, swings: 0 });
 
-    let path = 0;
+    let path = 0, swings = 0;
     const runs = { x: 0, y: 0 };
-    let swings = 0;
     for (let i = 1; i < this.samples.length; i++) {
       const dx = this.samples[i].x - this.samples[i - 1].x;
       const dy = this.samples[i].y - this.samples[i - 1].y;
@@ -125,9 +131,12 @@ export class Motion {
         }
       }
     }
-    return { speed: path / span, swings };
+    return (this.result = { speed: path / span, swings });
   }
 }
+
+/** Is the hand-gesture reading strong enough for talking_to_wall? */
+export const waving = (g) => g.swings >= GESTURE.minSwings && g.speed >= GESTURE.speed;
 
 /** Every expression channel, raw and in sigma above your own neutral. */
 export function measure(face, base) {
@@ -140,9 +149,14 @@ export function measure(face, base) {
     squint: Math.max(pair("eyeSquint"), pair("eyeBlink")),
     z_squint: Math.max(zpair("eyeSquint"), zpair("eyeBlink")),
     turn: Math.abs(face.turnSigned - base.neutralTurn),
+    z_stretch: zpair("mouthStretch"),
+    smile: pair("mouthSmile"),
   };
-  const cap = (v) => Math.min(v, Z_CAP);
-  m.z_disgust = 2 * cap(m.z_sneer) + cap(m.z_brow) + cap(m.z_frown) + cap(m.z_lip);
+  const cap = (v, c = Z_CAP) => Math.min(v, c);
+  // MediaPipe's nose-scrunch barely registers on most real disgusted faces; the
+  // grimace does (lips stretched wide, corners down). Stretch is capped lower so
+  // it can't fire on its own — it needs a frown, brow or lip raise alongside.
+  m.z_disgust = 2 * cap(m.z_sneer) + cap(m.z_brow) + cap(m.z_frown) + cap(m.z_lip) + cap(m.z_stretch, 6);
   return m;
 }
 
@@ -227,6 +241,17 @@ export function decide(face, hands, body, tongue, gesture, m) {
   const near = (a, b, k) => dist(a, b) < k * fw;
   const elbowsUp = !!body?.elbowsUp;
   const screaming = over("scream_jaw", m, "z_jaw", "jaw");
+  // Where hands go to cover your nose and mouth.
+  const lowerFace = [(face.nose[0] + face.mouth[0]) / 2, (face.nose[1] + face.mouth[1]) / 2];
+
+  // Movement first: a waving hand passes through every static pose on the way
+  // (hand_up especially), so check for waving before reading the hand shape.
+  if (waving(gesture)) return "talking_to_wall";
+
+  // Face hidden behind your hands: we only know where it was, and that a hand is on it.
+  if (face.ghost) {
+    return hands.some((h) => near(h.palm, face.center, 0.7)) ? "cover_nose" : null;
+  }
 
   if (hands.length >= 2) {
     const [a, b] = hands;
@@ -236,11 +261,16 @@ export function decide(face, hands, body, tongue, gesture, m) {
     }
     if (near(a.index, b.index, 0.3) && near(a.thumb, b.thumb, 0.3) && a.index[1] + b.index[1] < a.thumb[1] + b.thumb[1])
       return "heart";
-    if (near(a.palm, face.mouth, 0.6) && near(b.palm, face.mouth, 0.6)) return "cover_nose";
+    if (near(a.palm, lowerFace, 0.7) && near(b.palm, lowerFace, 0.7)) return "cover_nose";
     const onHead = (h) => h.palm[1] < face.eyeY && Math.abs(h.palm[0] - face.nose[0]) < 1.1 * fw &&
       h.palm[1] > face.top[1] - 0.8 * face.h;
     if (onHead(a) && onHead(b) && screaming) return "crashing_out";
   }
+
+  // Two overlapping hands often read as one: a flat open hand over the nose and
+  // mouth counts too. (A pinch is a closed hand; flirty is a fingertip, palm away.)
+  // A fingertip right on the lips is flirty, not a cover.
+  if (hands.some((h) => h.open && near(h.palm, lowerFace, 0.4) && !near(h.index, face.mouth, 0.15))) return "cover_nose";
 
   // Hands behind your head are often invisible, so no hands counts as "all near the head".
   const nearHead = (h) => Math.abs(h.palm[0] - face.nose[0]) < 1.3 * fw && h.palm[1] < face.eyeY + 0.3 * face.h;
@@ -257,8 +287,8 @@ export function decide(face, hands, body, tongue, gesture, m) {
 
   if (tongue > T.tongue) return "tongue_out";
   if (over("jaw_open", m, "z_jaw", "jaw")) return "open_mouth";
-  if (over("sneer", m, "z_sneer", "sneer") || m.z_disgust >= Z.disgust) return "disgusted";
-  if (hands.length && gesture.swings >= GESTURE.minSwings && gesture.speed >= GESTURE.speed) return "talking_to_wall";
+  // ...but a big grin stretches the lips too, so not while smiling.
+  if ((over("sneer", m, "z_sneer", "sneer") || m.z_disgust >= Z.disgust) && m.smile < T.smile) return "disgusted";
   if (m.turn > T.head_turn && over("squint", m, "z_squint", "squint")) return "suspicious";
   return null;
 }

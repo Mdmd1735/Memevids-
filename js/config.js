@@ -37,22 +37,29 @@ export const ARM = {
 export const DEFAULT_ARM = 3;
 
 // Sigma above your own neutral face.
-export const Z = { jaw_open: 6.0, scream_jaw: 3.5, tongue_jaw: 3.5, sneer: 4.5, disgust: 14.0, squint: 4.0 };
+// sneer / disgust are lower than the Python's (4.5 / 14): MediaPipe's nose-scrunch
+// channel barely moves for most faces, so the old bar was close to unreachable.
+export const Z = { jaw_open: 6.0, scream_jaw: 3.5, tongue_jaw: 3.5, sneer: 3.0, disgust: 9.0, squint: 4.0 };
 export const Z_CAP = 8.0;
 // ...and a raw floor, so a tiny sigma can't become a hair trigger.
-export const FLOOR = { jaw_open: 0.30, scream_jaw: 0.18, tongue_jaw: 0.18, sneer: 0.06, squint: 0.18 };
-export const T = { tongue: 0.5, head_turn: 0.15 };
+export const FLOOR = { jaw_open: 0.30, scream_jaw: 0.18, tongue_jaw: 0.18, sneer: 0.04, squint: 0.18 };
+export const T = { tongue: 0.5, head_turn: 0.15, smile: 0.35 };
 
 // talking_to_wall: big, repeated back-and-forth hand movement, not just a hand
 // that moves. Distances are in face widths, so it works at any distance; times
 // are in seconds, so it behaves the same at 10 fps on a phone or 30 on a laptop.
 export const GESTURE = {
-  window: 1.2,      // look at the last 1.2 s of hand movement
+  window: 1.5,      // look at the last 1.5 s of hand movement
   jitter: 0.02,     // ignore per-frame wobble smaller than this (tracking noise)
   swing: 0.35,      // a "swing" is a move of at least this far before reversing
-  minSwings: 3,     // ...and you need this many in the window (wave, wave, wave)
-  speed: 2.5,       // ...with the hand covering at least this many face widths per second
+  minSwings: 2,     // ...and you need this many in the window (there-and-back, twice)
+  speed: 1.5,       // ...with the hand covering at least this many face widths per second
+  gap: 0.4,         // fast hands blur and drop out for a frame or two; keep the history this long
 };
+
+// Hands over your face often make the face detector lose it. Remember where the
+// face was for this long, so hand poses (cover_nose especially) still work.
+export const FACE_MEMORY_MS = 700;
 
 export const CALIB = {
   seconds: 5.0,          // Python uses 7; shorter suits a photobooth
