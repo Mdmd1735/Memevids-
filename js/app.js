@@ -62,56 +62,76 @@ async function init() {
       : "The camera only works on an https:// link (or localhost). Open the GitHub Pages / https link instead of a plain http:// address.");
     return;
   }
+
+  // Ask for the camera straight away and load the models alongside it, so the
+  // permission prompt appears immediately and you see yourself while they load.
+  setStatus("Starting the camera…");
+  const models = loadModels();
+  models.catch(() => {});   // handled below; don't report it twice
+
   try {
-    setStatus("Loading memes and the face, hand and body models…");
-    const wasmPath = await loadMediaPipe();
-    const fileset = await FilesetResolver.forVisionTasks(wasmPath);
-    [assets, faceLandmarker, handLandmarker, poseLandmarker] = await Promise.all([
-      loadAssets(ASSETS),
-      create(FaceLandmarker, fileset, MEDIAPIPE.faceModel, { numFaces: 1, outputFaceBlendshapes: true }),
-      create(HandLandmarker, fileset, MEDIAPIPE.handModel, { numHands: 2 }),
-      create(PoseLandmarker, fileset, MEDIAPIPE.poseModel, { numPoses: 1 }),
-    ]);
-
-    // The first detection compiles GPU programs and can stall for a moment;
-    // do it now, behind the loading message, rather than on the first live frame.
-    setStatus("Warming up the models…");
-    await new Promise((r) => setTimeout(r, 0));
-    const warm = document.createElement("canvas");
-    warm.width = 320;
-    warm.height = 240;
-    warm.getContext("2d").fillRect(0, 0, 320, 240);
-    for (const lm of [faceLandmarker, handLandmarker, poseLandmarker]) lm.detectForVideo(warm, nextTs());
-
-    setStatus("Waiting for camera permission…");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "user",   // front camera on phones
-        width: { ideal: PHOTOBOOTH_CONFIG.camera.width },
-        height: { ideal: PHOTOBOOTH_CONFIG.camera.height },
-      },
-      audio: false,
-    });
-    video.srcObject = stream;
-    await new Promise((resolve) => {
-      if (video.readyState >= 1) resolve();
-      else video.addEventListener("loadedmetadata", resolve, { once: true });
-    });
-    await video.play();
-    renderer.resize(video.videoWidth || PHOTOBOOTH_CONFIG.camera.width, video.videoHeight || PHOTOBOOTH_CONFIG.camera.height);
-
-    calibrateBtn.disabled = false;
-    startBoothBtn.disabled = false;
-    setStatus(readyStatus());
-    requestAnimationFrame(loop);
+    await startCamera();
   } catch (err) {
-    console.error("Initialization error:", err);
+    console.error("Camera error:", err);
     const name = err?.name || "";
     if (name === "NotAllowedError") setStatus("Camera permission was denied. Allow camera access for this page and reload.");
     else if (name === "NotFoundError") setStatus("No camera found. Plug one in and reload.");
     else if (name === "NotReadableError") setStatus("The camera is busy in another app (Zoom, OBS, the Python version?). Close it and reload.");
-    else setStatus(`Couldn't start: ${err?.message || err}`);
+    else setStatus(`Couldn't start the camera: ${err?.message || err}`);
+    return;
   }
+  requestAnimationFrame(loop);
+  if (!faceLandmarker) setStatus("Camera on — loading the face, hand and body models (the first visit downloads about 40 MB)…");
+
+  try {
+    await models;
+  } catch (err) {
+    console.error("Model loading error:", err);
+    setStatus(`Couldn't load the models: ${err?.message || err}. Check your connection and reload.`);
+    return;
+  }
+  calibrateBtn.disabled = false;
+  startBoothBtn.disabled = false;
+  setStatus(readyStatus());
+}
+
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: "user",   // front camera on phones
+      width: { ideal: PHOTOBOOTH_CONFIG.camera.width },
+      height: { ideal: PHOTOBOOTH_CONFIG.camera.height },
+    },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await new Promise((resolve) => {
+    if (video.readyState >= 1) resolve();
+    else video.addEventListener("loadedmetadata", resolve, { once: true });
+  });
+  await video.play();
+  renderer.resize(video.videoWidth || PHOTOBOOTH_CONFIG.camera.width, video.videoHeight || PHOTOBOOTH_CONFIG.camera.height);
+}
+
+async function loadModels() {
+  const wasmPath = await loadMediaPipe();
+  const fileset = await FilesetResolver.forVisionTasks(wasmPath);
+  const [loadedAssets, face, hand, pose] = await Promise.all([
+    loadAssets(ASSETS),
+    create(FaceLandmarker, fileset, MEDIAPIPE.faceModel, { numFaces: 1, outputFaceBlendshapes: true }),
+    create(HandLandmarker, fileset, MEDIAPIPE.handModel, { numHands: 2 }),
+    create(PoseLandmarker, fileset, MEDIAPIPE.poseModel, { numPoses: 1 }),
+  ]);
+  // The first detection compiles GPU programs and can stall for a moment; do it
+  // on a blank frame now rather than on the first live one.
+  const warm = document.createElement("canvas");
+  warm.width = 320;
+  warm.height = 240;
+  warm.getContext("2d").fillRect(0, 0, 320, 240);
+  for (const lm of [face, hand, pose]) lm.detectForVideo(warm, nextTs());
+  // Only now hand them to the render loop, all at once.
+  assets = loadedAssets;
+  [faceLandmarker, handLandmarker, poseLandmarker] = [face, hand, pose];
 }
 
 // Prefer the pinned copy in vendor/ (works offline); fall back to the same
@@ -148,6 +168,10 @@ function loop() {
   }
   const { W, H } = renderer;
   const frame = renderer.capture(video, mirror);
+  if (!faceLandmarker) {   // models still loading: just show the camera
+    renderer.compose(null, 0);
+    return;
+  }
   const ts = nextTs();
   const fr = faceLandmarker.detectForVideo(frame, ts);
   const face = fr.faceLandmarks?.length ? new Face(fr.faceLandmarks[0], fr.faceBlendshapes?.[0], W, H, mirror) : null;

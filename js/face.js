@@ -5,8 +5,10 @@
 // Everything works in the coordinates of the frame as displayed. Head turn is
 // normalised to the mirrored convention so a calibration survives toggling the
 // mirror.
-import { Z, Z_CAP, FLOOR, T, GESTURE, ARM, DEFAULT_ARM, HOLD_FRAMES, POSES } from "./config.js";
+import { Z, Z_CAP, Z_DISGUST_UNCALIBRATED, FLOOR, T, GESTURE, ARM, DEFAULT_ARM, HOLD_FRAMES, POSES } from "./config.js";
 
+// Mid-cheek points (left, right): a patch of plain skin to compare the mouth against.
+const CHEEKS = [205, 425];
 const INNER_LIPS = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191];
 
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -151,6 +153,7 @@ export function measure(face, base) {
     turn: Math.abs(face.turnSigned - base.neutralTurn),
     z_stretch: zpair("mouthStretch"),
     smile: pair("mouthSmile"),
+    generic: base.generic,
   };
   const cap = (v, c = Z_CAP) => Math.min(v, c);
   // MediaPipe's nose-scrunch barely registers on most real disgusted faces; the
@@ -164,12 +167,19 @@ export function measure(face, base) {
 export const over = (key, m, zkey, rawkey) => m[zkey] >= Z[key] && m[rawkey] >= FLOOR[key];
 
 /**
- * Fraction of the mouth opening that reads pink: saturated and lit, unlike
- * teeth or throat. `ctx` is the clean (no overlay) mirrored frame.
+ * How much of the mouth opening is tongue, 0..1.
+ *
+ * Fixed "pink" colour thresholds break with phone white balance, dim light and
+ * different skin tones, so this compares the inside of the mouth with *your own
+ * cheeks*: skin leans orange, tongue leans pink-red (its hue sits clearly
+ * toward magenta from your skin's), teeth are pale, and the back of the throat
+ * is dark. Comparing hue, not "how red", is what works on warm, darker skin. A gasp shows mostly dark throat and teeth; a
+ * tongue sticking out fills the opening with red.
+ * `ctx` is the clean (no overlay) frame.
  */
 export function tongueScore(ctx, face, hands, jawReady) {
   if (!jawReady) return 0;
-  // A hand near the mouth is skin-pink too.
+  // A hand near the mouth is skin-coloured and confuses the comparison.
   if (hands.some((h) => dist(h.palm, face.mouth) < 0.7 * face.w)) return 0;
   const poly = INNER_LIPS.map((i) => face.pts[i]);
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -177,7 +187,12 @@ export function tongueScore(ctx, face, hands, jawReady) {
     if (x < x0) x0 = x; if (x > x1) x1 = x;
     if (y < y0) y0 = y; if (y > y1) y1 = y;
   }
-  if (x1 - x0 < 8 || y1 - y0 < 8) return 0;
+  // The lips have to be properly apart, relative to your face size.
+  if (x1 - x0 < 8 || y1 - y0 < Math.max(6, 0.06 * face.h)) return 0;
+
+  const skin = skinTone(ctx, face);
+  if (!skin) return 0;
+
   x0 = Math.max(Math.floor(x0), 0);
   y0 = Math.max(Math.floor(y0), 0);
   x1 = Math.min(Math.ceil(x1), ctx.canvas.width - 1);
@@ -185,23 +200,57 @@ export function tongueScore(ctx, face, hands, jawReady) {
   const w = x1 - x0 + 1, h = y1 - y0 + 1;
   if (w <= 0 || h <= 0) return 0;
 
-  // Python erodes the lip mask by 15% of its height; shrinking the polygon
-  // toward its centroid by the same amount is close enough and much cheaper.
+  // Stay a little inside the inner lip line so the lips themselves don't count.
   const cx = poly.reduce((s, q) => s + q[0], 0) / poly.length;
   const cy = poly.reduce((s, q) => s + q[1], 0) / poly.length;
-  const shrunk = poly.map(([x, y]) => [cx + (x - cx) * 0.85, cy + (y - cy) * 0.85]);
+  const shrunk = poly.map(([x, y]) => [cx + (x - cx) * 0.88, cy + (y - cy) * 0.88]);
 
   const data = ctx.getImageData(x0, y0, w, h).data;
-  let n = 0, pink = 0;
+  let n = 0, red = 0, dark = 0;
   for (let yy = 0; yy < h; yy++) {
     for (let xx = 0; xx < w; xx++) {
       if (!inside(shrunk, x0 + xx + 0.5, y0 + yy + 0.5)) continue;
       n++;
       const i = (yy * w + xx) * 4;
-      if (isPink(data[i], data[i + 1], data[i + 2])) pink++;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const max = Math.max(r, g, b);
+      if (max < skin.max * 0.35) { dark++; continue; }              // back of the throat
+      if ((max - Math.min(r, g, b)) / max < 0.18) continue;          // teeth: pale, unsaturated
+      // Degrees the pixel's hue sits toward pink/magenta from your skin's.
+      const toward = ((skin.hue - hue(r, g, b) + 540) % 360) - 180;
+      if (toward >= 10 && toward <= 70) red++;
     }
   }
-  return n < 40 ? 0 : pink / n;
+  if (n < 30) return 0;
+  // A mostly dark opening is a gasp with the tongue lying low, not a tongue out.
+  const darkFrac = dark / n;
+  return (red / n) * (darkFrac > 0.3 ? 0.5 : 1);
+}
+
+function hue(r, g, b) {
+  const max = Math.max(r, g, b), d = max - Math.min(r, g, b);
+  if (d === 0) return 0;
+  let h = max === r ? 60 * (((g - b) / d) % 6) : max === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+  return h < 0 ? h + 360 : h;
+}
+
+// Average colour of both cheeks: its hue and its brightness.
+function skinTone(ctx, face) {
+  let r = 0, g = 0, b = 0, max = 0, n = 0;
+  const half = Math.max(2, Math.round(face.w * 0.03));
+  for (const id of CHEEKS) {
+    const [px, py] = face.pts[id];
+    const x = Math.round(px) - half, y = Math.round(py) - half, s = half * 2 + 1;
+    if (x < 0 || y < 0 || x + s > ctx.canvas.width || y + s > ctx.canvas.height) continue;
+    const d = ctx.getImageData(x, y, s, s).data;
+    for (let i = 0; i < d.length; i += 4) {
+      r += d[i]; g += d[i + 1]; b += d[i + 2];
+      max += Math.max(d[i], d[i + 1], d[i + 2]);
+      n++;
+    }
+  }
+  if (!n) return null;
+  return { hue: hue(r / n, g / n, b / n), max: max / n };
 }
 
 function inside(poly, x, y) {
@@ -213,22 +262,6 @@ function inside(poly, x, y) {
   return hit;
 }
 
-// OpenCV HSV scale: H 0-180, S and V 0-255. Same thresholds as the Python.
-function isPink(r, g, b) {
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  if (max <= 110) return false;
-  const s = max === 0 ? 0 : ((max - min) / max) * 255;
-  if (s <= 70) return false;
-  const d = max - min;
-  let hue;
-  if (d === 0) hue = 0;
-  else if (max === r) hue = 60 * (((g - b) / d) % 6);
-  else if (max === g) hue = 60 * ((b - r) / d + 2);
-  else hue = 60 * ((r - g) / d + 4);
-  if (hue < 0) hue += 360;
-  const h = hue / 2;
-  return h < 12 || h > 160;
-}
 
 /** Return the raw pose for this frame, or null. Same order as the Python. */
 export function decide(face, hands, body, tongue, gesture, m) {
@@ -288,7 +321,8 @@ export function decide(face, hands, body, tongue, gesture, m) {
   if (tongue > T.tongue) return "tongue_out";
   if (over("jaw_open", m, "z_jaw", "jaw")) return "open_mouth";
   // ...but a big grin stretches the lips too, so not while smiling.
-  if ((over("sneer", m, "z_sneer", "sneer") || m.z_disgust >= Z.disgust) && m.smile < T.smile) return "disgusted";
+  const disgustBar = m.generic ? Z_DISGUST_UNCALIBRATED : Z.disgust;
+  if ((over("sneer", m, "z_sneer", "sneer") || m.z_disgust >= disgustBar) && m.smile < T.smile) return "disgusted";
   if (m.turn > T.head_turn && over("squint", m, "z_squint", "squint")) return "suspicious";
   return null;
 }

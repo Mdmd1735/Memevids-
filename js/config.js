@@ -39,11 +39,14 @@ export const DEFAULT_ARM = 3;
 // Sigma above your own neutral face.
 // sneer / disgust are lower than the Python's (4.5 / 14): MediaPipe's nose-scrunch
 // channel barely moves for most faces, so the old bar was close to unreachable.
-export const Z = { jaw_open: 6.0, scream_jaw: 3.5, tongue_jaw: 3.5, sneer: 3.0, disgust: 9.0, squint: 4.0 };
+export const Z = { jaw_open: 6.0, scream_jaw: 3.5, tongue_jaw: 2.0, sneer: 3.0, disgust: 9.0, squint: 4.0 };
 export const Z_CAP = 8.0;
+// Before you calibrate, faces vary too much for the lower bar: use the old one.
+export const Z_DISGUST_UNCALIBRATED = 14.0;
 // ...and a raw floor, so a tiny sigma can't become a hair trigger.
-export const FLOOR = { jaw_open: 0.30, scream_jaw: 0.18, tongue_jaw: 0.18, sneer: 0.04, squint: 0.18 };
-export const T = { tongue: 0.5, head_turn: 0.15, smile: 0.35 };
+// tongue_jaw is low on purpose: sticking your tongue out barely opens the jaw.
+export const FLOOR = { jaw_open: 0.30, scream_jaw: 0.18, tongue_jaw: 0.08, sneer: 0.04, squint: 0.18 };
+export const T = { tongue: 0.4, head_turn: 0.15, smile: 0.35 };
 
 // talking_to_wall: big, repeated back-and-forth hand movement, not just a hand
 // that moves. Distances are in face widths, so it works at any distance; times
@@ -77,7 +80,7 @@ export const GENERIC_MEAN = {
   jawOpen: 0.08, eyeSquintLeft: 0.10, eyeSquintRight: 0.10,
   eyeBlinkLeft: 0.10, eyeBlinkRight: 0.10, noseSneerLeft: 0.03, noseSneerRight: 0.03,
   browDownLeft: 0.06, browDownRight: 0.06, mouthFrownLeft: 0.05, mouthFrownRight: 0.05,
-  mouthUpperUpLeft: 0.05, mouthUpperUpRight: 0.05,
+  mouthUpperUpLeft: 0.05, mouthUpperUpRight: 0.05, mouthStretchLeft: 0.08, mouthStretchRight: 0.08,
 };
 
 // Mirror the camera like a selfie (default) or show the true view, where text
