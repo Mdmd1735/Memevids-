@@ -28,7 +28,13 @@ export const ASSETS = {
 // One key per pose, matched by position in POSES: forces it on screen for 2 s.
 export const TEST_KEYS = "1234567890-=[]";
 
-export const FACE_SCALE = 2.0;     // meme height = face height x this
+// Meme size and placement. The meme sits on the top of your head so your mouth
+// and chin stay visible (you can see your own gasp / tongue next to the meme).
+export const MEME = {
+  scale: 1.0,    // meme height = your face height x this (was 2.0, which covered the whole face)
+  bottom: 0.1,   // the meme's bottom edge sits this far below the middle of your face, in face heights
+                 // (0.1 is about your nose tip; raise it to cover more of the face, lower it to show more)
+};
 export const HOLD_FRAMES = 10;     // linger after the pose stops
 export const ARM = {
   spin: 15, suspicious: 8, talking_to_wall: 6, dance: 6, crashing_out: 4,

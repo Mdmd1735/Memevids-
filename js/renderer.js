@@ -3,7 +3,7 @@
 // The mirror happens *in the canvas*, not with CSS, so meme text always reads
 // the right way round and the photos you save match what you saw. Turning the
 // mirror off gives the true view, where text on your clothes reads correctly.
-import { FACE_SCALE } from "./config.js";
+import { MEME } from "./config.js";
 
 export class OverlayRenderer {
   constructor(canvas) {
@@ -21,7 +21,7 @@ export class OverlayRenderer {
     this.W = W;
     this.H = H;
     this.smCenter = [W / 2, H / 2];
-    this.smH = H * 0.45;
+    this.smFaceH = H * 0.25;   // smoothed face height
   }
 
   /** Copy the webcam into the clean frame (mirrored like a selfie, or not). */
@@ -38,7 +38,7 @@ export class OverlayRenderer {
   track(face) {
     if (!face) return;
     this.smCenter = [0.7 * this.smCenter[0] + 0.3 * face.center[0], 0.7 * this.smCenter[1] + 0.3 * face.center[1]];
-    this.smH = 0.7 * this.smH + 0.3 * face.h * FACE_SCALE;
+    this.smFaceH = 0.7 * this.smFaceH + 0.3 * face.h;
   }
 
   /** Composite the clean frame + the current meme frame onto the visible canvas. */
@@ -47,10 +47,10 @@ export class OverlayRenderer {
     ctx.drawImage(this.frame, 0, 0);
     if (!asset) return;
     const sprite = asset.frameAt(elapsedMs);
-    const h = Math.max(8, Math.floor(Math.min(this.smH, H * 0.98, (W * 0.98) / asset.aspect)));
+    const h = Math.max(8, Math.floor(Math.min(this.smFaceH * MEME.scale, H * 0.98, (W * 0.98) / asset.aspect)));
     const w = Math.round(h * asset.aspect);
     const x = this.smCenter[0] - w / 2;
-    const y = this.smCenter[1] - h / 2 - 0.05 * h;
+    const y = this.smCenter[1] + MEME.bottom * this.smFaceH - h;   // bottom edge just below the nose
     ctx.drawImage(sprite, x, y, w, h);
   }
 
