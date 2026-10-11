@@ -76,6 +76,7 @@ export const CALIB = {
   warmup: 1.0,           // ignore the first second while you settle
   minSamples: 30,
   maxSeconds: 12.0,      // slow machines keep collecting past `seconds` until minSamples
+  minSamplesSlow: 15,    // ...and if they still haven't got there by maxSeconds, this many will do
   sigmaFloor: 0.015,
   sigmaCeil: 0.080,
   version: 1,
@@ -97,6 +98,22 @@ export const MIRROR_DEFAULT = true;
 // Phones / tablets (touch-first) get a lighter setup: smaller camera frames and
 // GIF frames, so three detectors and ~150 MB of GIF frames don't choke Safari.
 export const IS_PHONE = matchMedia("(pointer: coarse)").matches;
+
+// Groups: how many people get tracked at once, and how hands / bodies are
+// matched to them (distances in face widths). Phones track fewer people, since
+// every extra face, hand and body costs detection time.
+// Group mode can be switched off in the page (remembered per browser) for the
+// faster one-person setup.
+export const GROUP_DEFAULT = true;
+
+export const PEOPLE = {
+  max: IS_PHONE ? 3 : 4,
+  hands: IS_PHONE ? 4 : 6,   // total hands looked for across everyone
+  matchDist: 1.2,            // a face this close to where someone was last frame is still them
+  handReach: 2.5,            // a hand belongs to the nearest face within this distance
+  bodyReach: 2.5,            // shoulders belong to the nearest face above them within this distance
+  poseEvery: 2,              // check bodies (shoulders/elbows) every Nth frame; they move slowly and cost time
+};
 
 export const PHOTOBOOTH_CONFIG = {
   camera: IS_PHONE ? { width: 640, height: 480 } : { width: 1280, height: 720 },

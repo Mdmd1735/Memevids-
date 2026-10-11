@@ -82,6 +82,14 @@ It has to be served — opening `index.html` as a file won't load. Everything
 runs locally in the browser; MediaPipe and the GIF decoder are pinned in
 `vendor/` for the same reason `requirements.txt` is pinned.
 
+**Groups:** up to 4 people at once (3 on phones), each with their own meme.
+Faces are matched frame to frame by distance, and each person gets the hands
+and shoulders nearest them (`js/people.js`, settings in `PEOPLE` in
+`js/config.js`). Calibrate with everyone in frame and each person is measured
+against their own neutral face. Untick **Group mode** for the faster
+one-person setup (MediaPipe keeps searching for more faces and hands while
+fewer than the maximum are in frame, which costs a little every frame).
+
 It does all fourteen reactions, hand signs included, with the same rules,
 order and thresholds as `its_giving_v2.py` — face blendshapes scored in sigma
 above your own neutral face, two hands, and shoulders/elbows from the pose

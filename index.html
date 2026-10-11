@@ -12,12 +12,13 @@
   <link rel="modulepreload" href="js/face.js" />
   <link rel="modulepreload" href="js/assets.js" />
   <link rel="modulepreload" href="js/renderer.js" />
+  <link rel="modulepreload" href="js/people.js" />
 </head>
 <body>
   <div class="app-container">
     <header>
       <h1>IT'S GIVING <span>PHOTOBOOTH</span></h1>
-      <p>Calibrate your neutral face, pull a face, and make a 4-photo strip.</p>
+      <p>Calibrate, pull a face, and make a 4-photo strip. Bring friends — everyone gets their own meme.</p>
     </header>
 
     <main class="main-content">
@@ -30,13 +31,17 @@
         </div>
 
         <div class="controls">
-          <button id="calibrateBtn" class="btn secondary" disabled>1. Calibrate Face (5s)</button>
+          <button id="calibrateBtn" class="btn secondary" disabled>1. Calibrate (5s)</button>
           <button id="startBoothBtn" class="btn primary" disabled>2. Start Photo Strip (4 Pics)</button>
         </div>
         <div class="tools">
           <label class="toggle" title="Off shows the true view, so text on your clothes reads the right way round">
             <input type="checkbox" id="mirrorToggle" checked />
             <span>Mirror like a selfie</span>
+          </label>
+          <label class="toggle" title="Track up to 4 people at once (3 on phones). Off is a little faster when you're alone.">
+            <input type="checkbox" id="groupToggle" checked />
+            <span>Group mode</span>
           </label>
           <select id="testPose" class="mini" aria-label="Preview a meme">
             <option value="">Preview a meme…</option>
@@ -46,6 +51,7 @@
         <p id="statusText" class="status" role="status">Starting…</p>
         <details class="poses">
           <summary>14 reactions — how to trigger them</summary>
+          <p>Up to 4 people at once (3 on phones). Calibrate with everyone in frame so each person's face is measured against their own neutral.</p>
           <ul>
             <li><b>Time out</b> — referee's T: one hand flat on top, one upright underneath</li>
             <li><b>Heart</b> — both hands, index tips together, thumb tips together</li>

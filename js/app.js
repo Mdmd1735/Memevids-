@@ -1,6 +1,7 @@
-import { ASSETS, CALIB, FACE_MEMORY_MS, GESTURE, IS_PHONE, MEDIAPIPE, MIRROR_DEFAULT, PHOTOBOOTH_CONFIG, POSES, TEST_KEYS, Z } from "./config.js";
+import { ASSETS, CALIB, GESTURE, GROUP_DEFAULT, IS_PHONE, MEDIAPIPE, MIRROR_DEFAULT, PEOPLE, PHOTOBOOTH_CONFIG, POSES, TEST_KEYS, Z } from "./config.js";
 import { Baseline, Collector, calibrationWarnings } from "./calibration.js";
-import { Body, Face, Hand, Motion, PoseTracker, decide, measure, over, tongueScore, waving } from "./face.js";
+import { Body, Face, Hand, PoseTracker, decide, measure, over, tongueScore, waving } from "./face.js";
+import { People } from "./people.js";
 import { loadAssets } from "./assets.js";
 import { OverlayRenderer } from "./renderer.js";
 
@@ -16,31 +17,37 @@ const stripPreview = $("stripPreview");
 const hud = $("hud");
 const debugLayer = $("debugCanvas");
 const mirrorToggle = $("mirrorToggle");
+const groupToggle = $("groupToggle");
 const debugBtn = $("debugBtn");
 const testPose = $("testPose");
 
 const renderer = new OverlayRenderer(canvas);
-const tracker = new PoseTracker();
-let base = Baseline.load();
-const motion = new Motion();
+const people = new People();
+// "spin" (everyone left the frame) belongs to nobody, so it has its own tracker.
+const roomTracker = new PoseTracker();
+let base = Baseline.load();        // saved calibration (the main person's)
+const GENERIC = new Baseline();    // for people nobody calibrated
+let lastSpot = null;               // where the last person was, for the spin meme
 let faceLandmarker = null, handLandmarker = null, poseLandmarker = null;
 let FaceLandmarker, HandLandmarker, PoseLandmarker, FilesetResolver;
 let mirror = loadMirror();
-let lastFace = null, lastFaceAt = -Infinity;
+let group = loadPref("itsgiving.group", GROUP_DEFAULT);
+let reconfiguring = false;   // true while the detectors switch between group and solo
 let assets = {};
 let lastVideoTime = -1;
 let lastTs = -1;
-let calibration = null;   // { collector, start, seen } while calibrating
+let calibration = null;   // { collectors: Map(personId -> Collector), start, seen } while calibrating
 let boothRunning = false;
 let stripPhotos = [];
 let fps = 0, fpsFrames = 0, fpsSince = performance.now();
+let frameNo = 0, lastBodies = [];
 
 const setStatus = (msg) => { statusText.textContent = msg; };
 
 function readyStatus() {
   return base.generic
     ? "Ready — not calibrated yet, so reactions are harder to trigger. Click 'Calibrate Face' first."
-    : `Ready — calibrated ${base.made} on ${base.samples} frames. Pull a face!`;
+    : `Ready — calibrated ${base.made} on ${base.samples} frames. Pull a face! (Friends joining? Calibrate with everyone in frame.)`;
 }
 
 // GPU where the browser allows it, CPU otherwise.
@@ -118,9 +125,9 @@ async function loadModels() {
   const fileset = await FilesetResolver.forVisionTasks(wasmPath);
   const [loadedAssets, face, hand, pose] = await Promise.all([
     loadAssets(ASSETS),
-    create(FaceLandmarker, fileset, MEDIAPIPE.faceModel, { numFaces: 1, outputFaceBlendshapes: true }),
-    create(HandLandmarker, fileset, MEDIAPIPE.handModel, { numHands: 2 }),
-    create(PoseLandmarker, fileset, MEDIAPIPE.poseModel, { numPoses: 1 }),
+    create(FaceLandmarker, fileset, MEDIAPIPE.faceModel, { numFaces: counts().faces, outputFaceBlendshapes: true }),
+    create(HandLandmarker, fileset, MEDIAPIPE.handModel, { numHands: counts().hands }),
+    create(PoseLandmarker, fileset, MEDIAPIPE.poseModel, { numPoses: counts().faces }),
   ]);
   // The first detection compiles GPU programs and can stall for a moment; do it
   // on a blank frame now rather than on the first live one.
@@ -168,46 +175,72 @@ function loop() {
   }
   const { W, H } = renderer;
   const frame = renderer.capture(video, mirror);
-  if (!faceLandmarker) {   // models still loading: just show the camera
-    renderer.compose(null, 0);
+  if (!faceLandmarker || reconfiguring) {   // models loading / switching: just show the camera
+    renderer.compose([]);
     return;
   }
   const ts = nextTs();
+  const now = performance.now();
   const fr = faceLandmarker.detectForVideo(frame, ts);
-  const face = fr.faceLandmarks?.length ? new Face(fr.faceLandmarks[0], fr.faceBlendshapes?.[0], W, H, mirror) : null;
+  const faces = (fr.faceLandmarks || []).map((l, i) => new Face(l, fr.faceBlendshapes?.[i], W, H, mirror));
 
   if (calibration) {
-    stepCalibration(face);
+    people.update(faces, [], [], now);
+    stepCalibration(now);
     return;
   }
 
   const hr = handLandmarker.detectForVideo(frame, ts);
-  const pr = poseLandmarker.detectForVideo(frame, ts);
   const hands = (hr.landmarks || []).map((l) => new Hand(l, W, H));
-  const body = pr.landmarks?.length ? new Body(pr.landmarks[0], W, H) : null;
-
-  const now = performance.now();
-  if (face) {
-    lastFace = face;
-    lastFaceAt = now;
+  if (frameNo++ % PEOPLE.poseEvery === 0) {
+    const pr = poseLandmarker.detectForVideo(frame, ts);
+    lastBodies = (pr.landmarks || []).map((l) => new Body(l, W, H));
   }
-  const gesture = motion.update(hands, face, now);
-  // Face lost while your hands are up (covering it, or blurring past it): carry
-  // on with where it was a moment ago, for hand poses only. Expressions are unknown.
-  const ghost = !face && lastFace && now - lastFaceAt < FACE_MEMORY_MS && (hands.length || waving(gesture))
-    ? Object.assign(Object.create(Face.prototype), lastFace, { ghost: true })
-    : null;
-  const m = face ? measure(face, base) : {};
-  const tongue = face ? tongueScore(renderer.fctx, face, hands, over("tongue_jaw", m, "z_jaw", "jaw")) : 0;
-  const raw = decide(face || ghost, hands, body, tongue, gesture, m);
-  const shown = tracker.update(raw, now);
+  const bodies = lastBodies;
+  people.update(faces, hands, bodies, now);
 
-  renderer.track(face);
-  renderer.compose(shown ? assets[shown] : null, now - tracker.shownSince);
+  // Each person gets judged on their own face, hands and body, with their own meme.
+  const overlays = [];
+  for (const p of people.list) {
+    const gesture = p.motion.update(p.hands, p.face, now);
+    // Face hidden behind hands, or blurring past: keep judging hand poses on where it was.
+    const face = p.faceOrGhost(p.hands.length > 0 || waving(gesture));
+    const b = baselineFor(p);
+    const m = p.face ? measure(p.face, b) : {};
+    const tongue = p.face ? tongueScore(renderer.fctx, p.face, p.hands, over("tongue_jaw", m, "z_jaw", "jaw")) : 0;
+    const raw = face ? decide(face, p.hands, p.body, tongue, gesture, m) : null;
+    const shown = p.tracker.update(raw, now);
+    p.debug = { raw, shown, m, tongue, gesture, ghost: !p.face && !!face };
+    if (shown) overlays.push({ asset: assets[shown], elapsed: now - p.tracker.shownSince, center: p.center, faceH: p.faceH });
+    lastSpot = { center: [...p.center], faceH: p.faceH };
+  }
+
+  // Everyone gone (no faces, hands or bodies): spin, where the last person was.
+  const empty = !people.list.length && !hands.length && !bodies.some((b) => b.seen);
+  const roomShown = roomTracker.update(empty ? "spin" : null, now);
+  if (roomShown && !people.list.length && lastSpot) {
+    overlays.push({ asset: assets[roomShown], elapsed: now - roomTracker.shownSince, ...lastSpot });
+  }
+
+  renderer.compose(overlays);
   if (debugOn()) {
-    renderer.drawDebug(debugLayer, face, hands, body);
-    drawHud(shown, raw, face || ghost, hands, body, m, tongue, gesture);
+    const claimed = new Set(people.list.flatMap((p) => p.hands));
+    renderer.drawDebug(debugLayer, people.list, hands.filter((h) => !claimed.has(h)), bodies);
+    drawHud(people.list, hands.length, roomShown);
   }
+}
+
+/** Your own calibration if you were in frame for it; otherwise the saved one when you're alone. */
+function baselineFor(p) {
+  if (p.baseline) return p.baseline;
+  return people.list.length === 1 ? base : GENERIC;
+}
+
+/** "Preview a meme": show it on everyone in frame (or where the last person was). */
+function forcePose(pose) {
+  const now = performance.now();
+  for (const p of people.list) p.tracker.force(pose, now);
+  roomTracker.force(pose, now);
 }
 
 const debugOn = () => !hud.classList.contains("hidden");
@@ -217,6 +250,44 @@ function setDebug(on) {
   debugLayer.classList.toggle("hidden", !on);
   debugBtn.setAttribute("aria-pressed", String(on));
   if (!on) debugLayer.getContext("2d").clearRect(0, 0, debugLayer.width, debugLayer.height);
+}
+
+// ---- group mode ----------------------------------------------------------
+// MediaPipe only skips its search for new faces / hands once it is tracking the
+// most it was asked for, so allowing 4 people costs a little every frame even
+// when you're alone. Group mode off goes back to the one-person setup.
+
+function counts() {
+  return group ? { faces: PEOPLE.max, hands: PEOPLE.hands } : { faces: 1, hands: 2 };
+}
+
+function loadPref(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+async function setGroup(on) {
+  group = on;
+  groupToggle.checked = on;
+  people.max = counts().faces;
+  people.reset();
+  try { localStorage.setItem("itsgiving.group", on ? "1" : "0"); } catch { /* not persisted */ }
+  if (!faceLandmarker) return;   // models not loaded yet: they'll be created with the right counts
+  reconfiguring = true;
+  try {
+    const { faces, hands } = counts();
+    await Promise.all([
+      faceLandmarker.setOptions({ numFaces: faces }),
+      handLandmarker.setOptions({ numHands: hands }),
+      poseLandmarker.setOptions({ numPoses: faces }),
+    ]);
+  } finally {
+    reconfiguring = false;
+  }
 }
 
 // ---- mirror ----------------------------------------------------------------
@@ -234,66 +305,101 @@ function setMirror(on) {
   mirror = on;
   mirrorToggle.checked = on;
   try { localStorage.setItem("itsgiving.mirror", on ? "1" : "0"); } catch { /* not persisted */ }
-  // Positions jump to the other side; don't let that read as a fast gesture.
-  motion.reset();
+  // Positions jump to the other side; start tracking everyone afresh.
+  people.reset();
 }
 
 // ---- calibration ---------------------------------------------------------
 
 function startCalibration() {
   if (calibration || boothRunning || !faceLandmarker) return;
-  calibration = { collector: new Collector(), start: performance.now(), seen: 0 };
+  calibration = { collectors: new Map(), start: performance.now(), seen: 0 };
   calibrateBtn.disabled = true;
   startBoothBtn.disabled = true;
-  setStatus(`Hold a bored face for ${CALIB.seconds} seconds. Blinking is fine — don't talk, smile or raise your eyebrows.`);
+  setStatus(`Everyone in frame: hold a bored face for ${CALIB.seconds} seconds. Blinking is fine — don't talk, smile or raise your eyebrows.`);
 }
 
-function stepCalibration(face) {
+// Calibrates everyone in frame at once: each person gets their own neutral face.
+function stepCalibration(now) {
   const c = calibration;
-  const elapsed = (performance.now() - c.start) / 1000;
-  if (face) {
-    c.seen++;
-    if (elapsed > CALIB.warmup && Object.keys(face.bs).length) c.collector.add(face);
+  const elapsed = (now - c.start) / 1000;
+  if (people.list.some((p) => p.face)) c.seen++;
+  if (elapsed > CALIB.warmup) {
+    for (const p of people.list) {
+      if (!p.face || !Object.keys(p.face.bs).length) continue;
+      if (!c.collectors.has(p.id)) c.collectors.set(p.id, new Collector());
+      c.collectors.get(p.id).add(p.face);
+    }
   }
-  renderer.compose(null, 0);
+  const most = Math.max(0, ...[...c.collectors.values()].map((k) => k.n));
+  renderer.compose([]);
   // Normally done at CALIB.seconds; a slow machine keeps going until it has enough frames.
-  const enough = c.collector.n >= CALIB.minSamples;
-  const progress = enough ? elapsed / CALIB.seconds : Math.min(elapsed / CALIB.seconds, c.collector.n / CALIB.minSamples);
-  renderer.drawCalibration(progress, c.collector.n, !!face);
+  const enough = most >= CALIB.minSamples;
+  const progress = enough ? elapsed / CALIB.seconds : Math.min(elapsed / CALIB.seconds, most / CALIB.minSamples);
+  renderer.drawCalibration(progress, most, people.list.some((p) => p.face), people.list.filter((p) => p.face).length);
   if (elapsed < CALIB.seconds || (!enough && elapsed < CALIB.maxSeconds)) return;
 
   calibration = null;
   calibrateBtn.disabled = false;
   startBoothBtn.disabled = false;
-  if (c.collector.n < CALIB.minSamples) {
-    setStatus(`Calibration failed: only ${c.collector.n} usable frames${c.seen ? "" : " — your face was never detected"}. ` +
+  // Everyone still in frame with enough frames gets their own baseline.
+  const done = [];
+  // (A slow phone that ran out of time still counts with fewer frames.)
+  const need = enough ? CALIB.minSamples : CALIB.minSamplesSlow;
+  for (const p of people.list) {
+    const k = c.collectors.get(p.id);
+    if (k && k.n >= need) {
+      p.baseline = k.finish();
+      done.push(p);
+    }
+  }
+  if (!done.length) {
+    setStatus(`Calibration failed: only ${most} usable frames${c.seen ? "" : " — no face was detected"}. ` +
       "Light your face from the front, sit head-and-shoulders in frame, and try again.");
     return;
   }
-  base = c.collector.finish();
+  // The biggest face (closest to the camera) is saved for next time.
+  const main = done.reduce((a, b) => (b.faceH > a.faceH ? b : a));
+  base = main.baseline;
   base.save();
-  tracker.reset();
-  motion.reset();
+  for (const p of people.list) {
+    p.tracker.reset();
+    p.motion.reset();
+  }
   const warn = calibrationWarnings(base);
+  const who = done.length > 1 ? `${done.length} people` : `on ${base.samples} frames`;
   setStatus(warn.length
-    ? `Calibrated on ${base.samples} frames, but ${warn.join("; ")}. Consider recalibrating.`
-    : `Calibrated on ${base.samples} frames. Pull a face or throw up a hand sign!`);
+    ? `Calibrated ${who}, but ${warn.join("; ")}. Consider recalibrating.`
+    : `Calibrated ${who}. Pull a face or throw up a hand sign!`);
 }
 
 // ---- debug HUD (press D) ------------------------------------------------
 
-function drawHud(shown, raw, face, hands, body, m, tongue, gesture) {
+function drawHud(list, handCount, roomShown) {
   const f = (v, d = 1) => (v ?? 0).toFixed(d);
   const s = (v) => `${(v ?? 0) >= 0 ? "+" : ""}${f(v)}σ`;
-  hud.textContent = [
-    `showing: ${shown || "-"}   raw: ${raw || "-"}   face: ${face ? (face.ghost ? "hidden" : "yes") : "no"}   hands: ${hands.length}   ` +
-      `elbows up: ${body?.elbowsUp ? "Y" : "n"}   ${fps.toFixed(0)} fps   ${mirror ? "mirrored" : "true view"}`,
-    `jaw ${f(m.jaw, 2)} = ${s(m.z_jaw)} / ${Z.jaw_open}   squint ${f(m.squint, 2)} = ${s(m.z_squint)} / ${Z.squint}   ` +
-      `tongue ${f(tongue, 2)}   turn ${f(m.turn, 2)}   wave ${f(gesture.speed)}/${GESTURE.speed} fw/s, ${gesture.swings}/${GESTURE.minSwings} swings`,
-    `disgust ${s(m.z_disgust)} / ${Z.disgust} = 2x sneer ${s(m.z_sneer)} + brow ${s(m.z_brow)} + frown ${s(m.z_frown)} + lip ${s(m.z_lip)} + stretch ${s(m.z_stretch)}   smile ${f(m.smile, 2)}`,
-    base.generic ? "NOT CALIBRATED — generic baseline. Press C." : `calibrated ${base.made} on ${base.samples} frames`,
-    `keys: D debug   C calibrate   M mirror   test: ${POSES.map((p, i) => `${TEST_KEYS[i]} ${p}`).join("  ")}`,
-  ].join("\n");
+  const lines = [
+    `people: ${list.length}/${people.max}${group ? "" : " (group mode off)"}   hands: ${handCount}   ${fps.toFixed(0)} fps   ${mirror ? "mirrored" : "true view"}` +
+      (roomShown ? `   room: ${roomShown}` : ""),
+  ];
+  list.forEach((p, i) => {
+    const d = p.debug || {}, m = d.m || {}, g = d.gesture || { speed: 0, swings: 0 };
+    const b = baselineFor(p);
+    lines.push(
+      `P${i + 1} showing: ${d.shown || "-"}   raw: ${d.raw || "-"}   face: ${p.face ? "yes" : d.ghost ? "hidden" : "no"}   ` +
+        `hands: ${p.hands.length}   elbows up: ${p.body?.elbowsUp ? "Y" : "n"}   ` +
+        `${p.baseline ? "own calibration" : b.generic ? "NOT calibrated" : "saved calibration"}`,
+    );
+    if (i === 0 || list.length <= 2) {
+      lines.push(
+        `   jaw ${f(m.jaw, 2)} = ${s(m.z_jaw)} / ${Z.jaw_open}   squint ${f(m.squint, 2)} = ${s(m.z_squint)} / ${Z.squint}   ` +
+          `tongue ${f(d.tongue, 2)}   turn ${f(m.turn, 2)}   wave ${f(g.speed)}/${GESTURE.speed} fw/s, ${g.swings}/${GESTURE.minSwings} swings`,
+        `   disgust ${s(m.z_disgust)} / ${Z.disgust} = 2x sneer ${s(m.z_sneer)} + brow ${s(m.z_brow)} + frown ${s(m.z_frown)} + lip ${s(m.z_lip)} + stretch ${s(m.z_stretch)}   smile ${f(m.smile, 2)}`,
+      );
+    }
+  });
+  lines.push(`keys: D debug   C calibrate   M mirror   test: ${POSES.map((p, i) => `${TEST_KEYS[i]} ${p}`).join("  ")}`);
+  hud.textContent = lines.join("\n");
 }
 
 // ---- photobooth --------------------------------------------------------
@@ -398,10 +504,13 @@ for (const p of POSES) {
   testPose.appendChild(opt);
 }
 testPose.addEventListener("change", () => {
-  if (testPose.value) tracker.force(testPose.value, performance.now());
+  if (testPose.value) forcePose(testPose.value);
   testPose.value = "";
 });
 mirrorToggle.checked = mirror;
+groupToggle.checked = group;
+people.max = counts().faces;
+groupToggle.addEventListener("change", () => setGroup(groupToggle.checked));
 mirrorToggle.addEventListener("change", () => setMirror(mirrorToggle.checked));
 
 window.addEventListener("keydown", (e) => {
@@ -412,7 +521,7 @@ window.addEventListener("keydown", (e) => {
   else if (k === "m") setMirror(!mirror);
   else {
     const i = TEST_KEYS.indexOf(k);
-    if (i >= 0 && i < POSES.length) tracker.force(POSES[i], performance.now());
+    if (i >= 0 && i < POSES.length) forcePose(POSES[i]);
   }
 });
 
